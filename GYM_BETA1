@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GraveYard Mower</title>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.139.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.139.0/examples/js/controls/PointerLockControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.139.0/examples/js/loaders/GLTFLoader.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Press Start 2P', cursive;
+            background-color: #111827;
+        }
+        #gameCanvas {
+            width: 100%;
+            height: 100vh;
+            display: block;
+            cursor: grab;
+            position: fixed;
+            top: 0;
+            left: 0;
+            z-index: 0;
+        }
+        #gameCanvas:active {
+            cursor: grabbing;
+        }
+        .game-container {
+            position: relative;
+            width: 100%;
+            height: 100vh;
+        }
+        #scoreDisplay {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            color: #fff;
+            font-size: 1rem;
+            z-index: 1;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 0.5rem;
+            border-radius: 0.375rem;
+        }
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 20px;
+            height: 20px;
+            pointer-events: none;
+            z-index: 3;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #crosshair::before,
+        #crosshair::after {
+            content: '';
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.8);
+        }
+        #crosshair::before {
+            width: 2px;
+            height: 10px;
+        }
+        #crosshair::after {
+            width: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <canvas id="gameCanvas"></canvas>
+        <div id="scoreDisplay">Score: <span id="scoreValue">0</span></div>
+        <div id="crosshair"></div>
+    </div>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        let gameRunning = false;
+        let gameAnimationFrame;
+        let mower;  // Declare mower globally
+        let gravestones = [];
+        const gltfLoader = new THREE.GLTFLoader();
+
+        const tombstoneModelUrl = 'https://raw.githubusercontent.com/MentalWombat1/GraveYardMower/refs/heads/main/G-242.glb';
+        const playerModelUrl = 'https://raw.githubusercontent.com/MentalWombat1/GraveYardMower/refs/heads/main/mower.glb';
+
+        let wall1, wall2, wall3, wall4; // Declare these variables outside createWorld()
+        let planeMaterial; // Declare planeMaterial here!
+        let keys = {}; // To store which keys are pressed
+        let score = 0;
+        let grassPatches = []; // To store grass patch data for cutting
+        let previousRotation = 0; // Store the last rotation
+        const gridSize = 30; // Size of the grid
+        const gridSpacing = 2; // Space between grid lines
+        const maxGravestonesPerRow = 4;
+
+        function initGame() {
+            if (gameRunning) return;
+            gameRunning = true;
+            resizeCanvas(); // Call resizeCanvas here, after renderer is initialized
+            setupCameraAndControls();
+            createWorld();
+            createMower();
+            spawnGravestones();
+            setupInput();
+            animate();
+        }
+
+        function setupCameraAndControls() {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x000000);
+
+            camera.position.set(0, 10, 0);
+            camera.rotation.x = -Math.PI / 2;
+            camera.lookAt(0, 0, 0);
+
+            console.log("Camera position:", camera.position);
+            console.log("Camera rotation:", camera.rotation);
+        }
+
+        function createWorld() {
+            const planeGeometry = new THREE.PlaneGeometry(30, 30, 10, 10);
+            // Initialize vertex colors in the geometry
+            const vertexCount = planeGeometry.attributes.position.count;
+            const colors = new Float32Array(vertexCount * 3);
+            for (let i = 0; i < vertexCount; i++) {
+                const color = new THREE.Color(0x8FBC8F); // Start with light green
+                colors[i * 3] = color.r;
+                colors[i * 3 + 1] = color.g;
+                colors[i * 3 + 2] = color.b;
+            }
+            planeGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            planeMaterial = new THREE.MeshStandardMaterial({ color: 0x8FBC8F, side: THREE.DoubleSide, vertexColors: true });
+            const plane = new THREE.Mesh(planeGeometry, planeMaterial);
+            plane.rotation.x = -Math.PI / 2;
+            plane.receiveShadow = true;
+            scene.add(plane);
+
+            for (let i = 0; i <= 10; i++) {
+                for (let j = 0; j <= 10; j++) {
+                    grassPatches.push({
+                        x: i / 10,
+                        z: j / 10,
+                        isCut: false,
+                    });
+                }
+            }
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(10, 20, 0);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 1024;
+            directionalLight.shadow.mapSize.height = 1024;
+            scene.add(directionalLight);
+
+            const wallHeight = 3;
+            const wallThickness = 1;
+            const wallLength = 30;
+
+            const wallGeometry = new THREE.BoxGeometry(wallLength, wallHeight, wallThickness);
+            const wallMaterial = new THREE.MeshStandardMaterial({ color: 0x808080 });
+
+            wall1 = new THREE.Mesh(wallGeometry, wallMaterial);
+            const wall1X = 0;
+            const wall1Z = -wallLength / 2 - wallThickness / 2;
+            wall1.position.set(wall1X, wallHeight / 2, wall1Z);
+            wall1.castShadow = true;
+            scene.add(wall1);
+
+            wall2 = new THREE.Mesh(wallGeometry, wallMaterial);
+            const wall2X = 0;
+            const wall2Z = wallLength / 2 + wallThickness / 2;
+            wall2.position.set(wall2X, wallHeight / 2, wall2Z);
+            wall2.castShadow = true;
+            scene.add(wall2);
+
+            const wall3Geometry = new THREE.BoxGeometry(wallThickness, wallHeight, wallLength);
+            wall3 = new THREE.Mesh(wall3Geometry, wallMaterial);
+            const wall3X = -wallLength / 2 - wallThickness / 2;
+            const wall3Z = 0;
+            wall3.position.set(wall3X, wallHeight / 2, wall3Z);
+            wall3.rotation.y = 0;
+            wall3.castShadow = true;
+            scene.add(wall3);
+
+            wall4 = new THREE.Mesh(wall3Geometry, wallMaterial);
+            const wall4X = wallLength / 2 + wallThickness / 2;
+            const wall4Z = 0;
+            wall4.position.set(wall4X, wallHeight / 2, wall4Z);
+            wall4.castShadow = true;
+            scene.add(wall4);
+
+            console.log("Wall 1 position:", wall1.position, "Expected X:", wall1X, "Expected Z:", wall1Z);
+            console.log("Wall 2 position:", wall2.position, "Expected X:", wall2X, "Expected Z:", wall2Z);
+            console.log("Wall 3 position:", wall3.position, "Expected X:", wall3X, "Expected Z:", wall3Z);
+            console.log("Wall 4 position:", wall4.position, "Expected X:", wall4X, "Expected Z:", wall4Z);
+            console.log("Wall 3 rotation:", wall3.rotation);
+        }
+
+        function createMower() {
+            gltfLoader.load(playerModelUrl, (gltf) => {
+                mower = gltf.scene;
+                mower.scale.set(0.75, 0.75, 0.75);
+                const boundingBox = new THREE.Box3();
+                boundingBox.setFromObject(mower);
+                const modelHeight = boundingBox.max.y - boundingBox.min.y;
+
+                mower.position.set(0, modelHeight / 2, 0);
+                mower.castShadow = true;
+                scene.add(mower);
+
+            }, undefined, (error) => {
+                console.error('Error loading player model:', error);
+                const mowerGeometry = new THREE.BoxGeometry(1, 0.5, 1.5);
+                const mowerMaterial = new THREE.MeshStandardMaterial({ color: 0xFFD700 });
+                mower = new THREE.Mesh(mowerGeometry, mowerMaterial);
+                mower.scale.set(1.5, 1.5, 1.5);
+                mower.position.set(0, 0.25, 0);
+                mower.castShadow = true;
+                scene.add(mower);
+            });
+        }
+
+        function spawnGravestones() {
+            const occupiedPositions = new Set();
+            const halfGridSpacing = gridSpacing / 2;
+            const numGravestones = 20; // Double the amount of gravestones
+
+            // Calculate wall boundaries
+            const wallPadding = 3 * 0.75; // 3 times the scaled mower size (0.75)
+            const minX = -gridSize / 2 + wallPadding;
+            const maxX = gridSize / 2 - wallPadding;
+            const minZ = -gridSize / 2 + wallPadding;
+            const maxZ = gridSize / 2 - wallPadding;
+
+            for (let i = 0; i < numGravestones; i++) {
+                gltfLoader.load(tombstoneModelUrl, (gltf) => {
+                    const gravestoneModel = gltf.scene.children[0];
+
+                    let attempts = 0;
+                    let validPosition = false;
+                    let x, z;
+
+                    while (!validPosition && attempts < 100) {
+                        // Get random grid coordinates within the allowed bounds
+                        const gridX = Math.floor(Math.random() * (gridSize / gridSpacing + 1)) * gridSpacing - gridSize/2;
+                        const gridZ = Math.floor(Math.random() * (gridSize / gridSpacing + 1)) * gridSpacing - gridSize/2;
+
+                        x = gridX;
+                        z = gridZ;
+                        const positionKey = `${x.toFixed(2)},${z.toFixed(2)}`; // Use string for comparison
+
+                        // Check if the position is within the wall boundaries
+                        if (x >= minX && x <= maxX && z >= minZ && z <= maxZ) {
+                            // Check if the position is already occupied
+                            if (!occupiedPositions.has(positionKey)) {
+                                // Check for close proximity to other gravestones
+                                let nearbyCount = 0;
+                                for (const existingGravestone of gravestones) {
+                                    const distance = Math.hypot(x - existingGravestone.position.x, z - existingGravestone.position.z);
+                                    if (distance < gridSpacing * 2) { // Check within a radius
+                                        nearbyCount++;
+                                    }
+                                }
+
+                                if (nearbyCount < maxGravestonesPerRow) {
+                                    validPosition = true;
+                                    occupiedPositions.add(positionKey); // Mark the position as occupied
+                                }
+                            }
+                        }
+                        attempts++;
+                    }
+
+                    if (validPosition) {
+                        gravestoneModel.position.set(x, 0, z);
+                        gravestoneModel.castShadow = true;
+                        gravestones.push(gravestoneModel);
+                        scene.add(gravestoneModel);
+                    } else {
+                        console.warn("Failed to find a valid position for a gravestone after 100 attempts");
+                    }
+                }, undefined, (error) => {
+                    console.error('Error loading glTF model:', error);
+                    const gravestoneGeometry = new THREE.BoxGeometry(0.5, 1, 0.3);
+                    const gravestoneMaterial = new THREE.MeshStandardMaterial({ color: 0x808080 });
+                    const gravestone = new THREE.Mesh(gravestoneGeometry, gravestoneMaterial);
+
+                    let attempts = 0;
+                    let validPosition = false;
+                    let x, z;
+
+                    while (!validPosition && attempts < 100) {
+                        // Get random grid coordinates within the allowed bounds
+                        const gridX = Math.floor(Math.random() * (gridSize / gridSpacing + 1)) * gridSpacing - gridSize/2;
+                        const gridZ = Math.floor(Math.random() * (gridSize / gridSpacing + 1)) * gridSpacing - gridSize/2;
+
+                        x = gridX;
+                        z = gridZ;
+                        const positionKey = `${x.toFixed(2)},${z.toFixed(2)}`;
+
+                         if (x >= minX && x <= maxX && z >= minZ && z <= maxZ) {
+                            if (!occupiedPositions.has(positionKey)) {
+                                let nearbyCount = 0;
+                                for (const existingGravestone of gravestones) {
+                                    const distance = Math.hypot(x - existingGravestone.position.x, z - existingGravestone.position.z);
+                                    if (distance < gridSpacing * 2) {
+                                        nearbyCount++;
+                                    }
+                                }
+                                if (nearbyCount < maxGravestonesPerRow) {
+                                    validPosition = true;
+                                    occupiedPositions.add(positionKey);
+                                }
+                            }
+                        }
+                        attempts++;
+                    }
+
+                    if (validPosition) {
+                        gravestone.position.set(x, 0.5, z);
+                        gravestone.castShadow = true;
+                        gravestones.push(gravestone);
+                        scene.add(gravestone);
+                    } else {
+                         console.warn("Failed to find a valid position for a gravestone after 100 attempts (fallback)");
+                    }
+                });
+            }
+        }
+
+        function setupInput() {
+            document.addEventListener('keydown', (event) => {
+                keys[event.key.toLowerCase()] = true;
+            });
+            document.addEventListener('keyup', (event) => {
+                keys[event.key.toLowerCase()] = false;
+            });
+        }
+
+        function handleMovement() {
+            if (!mower) return;
+
+            const moveSpeed = 0.1;
+            let forward = 0;
+            let sideways = 0;
+
+            if (keys['s']) forward = 1;
+            if (keys['w']) forward = -1;
+            if (keys['a']) sideways = -1;
+            if (keys['d']) sideways = 1;
+
+            const direction = new THREE.Vector3(sideways, 0, forward);
+            direction.normalize();
+
+            let targetRotation = Math.atan2(direction.x, direction.z);
+            if (direction.x === 0 && direction.z === 0) {
+                targetRotation = previousRotation;
+            }
+
+            const lerpFactor = 0.2;
+            mower.rotation.y = THREE.MathUtils.lerp(mower.rotation.y, targetRotation, lerpFactor);
+            previousRotation = mower.rotation.y;
+
+            mower.position.x += direction.x * moveSpeed;
+            mower.position.z += direction.z * moveSpeed;
+
+            const halfWallLength = 30 / 2;
+            const halfMowerWidth = 0.75;
+            if (mower.position.x > halfWallLength - halfMowerWidth) {
+                mower.position.x = halfWallLength - halfMowerWidth;
+            }
+            if (mower.position.x < -halfWallLength + halfMowerWidth) {
+                mower.position.x = -halfWallLength + halfMowerWidth;
+            }
+            if (mower.position.z > halfWallLength - halfMowerWidth) {
+                mower.position.z = halfWallLength - halfMowerWidth;
+            }
+            if (mower.position.z < -halfWallLength + halfMowerWidth) {
+                mower.position.z = -halfWallLength + halfMowerWidth;
+            }
+
+            for (const gravestone of gravestones) {
+                const distance = mower.position.distanceTo(gravestone.position);
+                if (distance < 1) {
+                    const collisionDirection = new THREE.Vector3();
+                    collisionDirection.subVectors(mower.position, gravestone.position).normalize();
+                    mower.position.x = gravestone.position.x + collisionDirection.x * 1;
+                    mower.position.z = gravestone.position.z + collisionDirection.z * 1;
+                }
+            }
+        }
+
+        function handleGrassCutting() {
+            if (!mower) return;
+
+            const planeGeometry = scene.children.find(obj => obj instanceof THREE.Mesh && obj.geometry instanceof THREE.PlaneGeometry);
+            if (!planeGeometry) return;
+
+            const planeSize = 30;
+            const normalizedX = (mower.position.x + planeSize / 2) / planeSize;
+            const normalizedZ = (mower.position.z + planeSize / 2) / planeSize;
+
+            let closestPatch = null;
+            let minDistance = Infinity;
+            for (const patch of grassPatches) {
+                const distance = Math.hypot(normalizedX - patch.x, normalizedZ - patch.z);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    closestPatch = patch;
+                }
+            }
+
+            if (minDistance < 0.1 && !closestPatch.isCut) {
+                closestPatch.isCut = true;
+                score += 10;
+                document.getElementById('scoreValue').textContent = score;
+
+                let geometry = planeGeometry.geometry;
+                if (!geometry.index) {
+                    geometry = geometry.toNonIndexed();
+                }
+
+                const vertexIndex = (Math.round(closestPatch.z * 10) * 11) + Math.round(closestPatch.x * 10);
+                const colorAttribute = geometry.attributes.color;
+
+                console.log("Mowing grass at:", normalizedX, normalizedZ);
+                console.log("Closest patch index:", vertexIndex);
+
+
+                if (colorAttribute) {
+                    console.log("Color attribute found! attribute count:", colorAttribute.count);
+                    const originalColor = {
+                        r: colorAttribute.getX(vertexIndex),
+                        g: colorAttribute.getY(vertexIndex),
+                        b: colorAttribute.getZ(vertexIndex)
+                    };
+                    console.log("Current color:", originalColor.r, originalColor.g, originalColor.b);
+
+                    const newColor = new THREE.Color(0x228B22); // Darker Green
+                    console.log("New color (hex):", newColor.getHex());
+                    console.log("New color (r,g,b):", newColor.r, newColor.g, newColor.b);
+
+
+                    // Check if the vertex index is within the bounds of the color attribute
+                    if (vertexIndex < colorAttribute.count) {
+                        try {
+                            colorAttribute.setXYZ(vertexIndex, newColor.r, newColor.g, newColor.b);
+                            colorAttribute.needsUpdate = true;
+                            geometry.attributes.color.needsUpdate = true; // Force update
+
+                        } catch (error) {
+                            console.error("Error setting vertex color:", error);
+                            console.error("Error details:", error.message, error.stack);
+                        }
+
+                    } else {
+                        console.warn("Vertex index out of bounds for color attribute:", vertexIndex, colorAttribute.count);
+                    }
+                } else {
+                    console.warn("Color attribute is undefined. Cannot change grass color.");
+                }
+
+                // Check material
+                if (planeMaterial.vertexColors !== THREE.VertexColors) {
+                    console.warn("Material does NOT use vertex colors!  Material type:", planeMaterial.type);
+                } else {
+                    console.log("Material DOES use vertex colors! Material type:", planeMaterial.type);
+                }
+                console.log("handleGrassCutting called"); // Add this line
+            }
+        }
+
+        function animate() {
+            if (!gameRunning) return;
+            console.log("animate() called");
+            gameAnimationFrame = requestAnimationFrame(animate);
+
+            handleMovement();
+            handleGrassCutting();
+
+            if (mower) {
+                camera.position.set(mower.position.x, 10, mower.position.z);
+                camera.lookAt(mower.position);
+            }
+
+            if (mower) {
+                console.log("Mower position:", mower.position);
+            }
+            gravestones.forEach((gravestone, index) => {
+                console.log(`Gravestone ${index + 1} position:`, gravestone.position);
+            });
+            const wall1WorldPosition = new THREE.Vector3();
+            const wall2WorldPosition = new THREE.Vector3();
+            const wall3WorldPosition = new THREE.Vector3();
+            const wall4WorldPosition = new THREE.Vector3();
+
+            if (wall1) {
+                wall1.getWorldPosition(wall1WorldPosition);
+            }
+            if (wall2) {
+                wall2.getWorldPosition(wall2WorldPosition);
+            }
+            if (wall3) {
+                wall3.getWorldPosition(wall3WorldPosition);
+            }
+            if (wall4) {
+                wall4.getWorldPosition(wall4WorldPosition);
+            }
+
+
+            console.log("Wall 1 world position:", wall1WorldPosition);
+            console.log("Wall 2 world position:", wall2WorldPosition);
+            console.log("Wall 3 world position:", wall3WorldPosition);
+            console.log("Wall 4 world position:", wall4WorldPosition);
+
+            renderer.render(scene, camera);
+            console.log("renderer.render() called");
+        }
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+
+            console.log("Canvas width:", canvas.width);
+            console.log("Canvas height:", canvas.height);
+            console.log("Renderer width:", renderer.domElement.width);
+            console.log("Renderer height:", renderer.domElement.height);
+        }
+
+        window.addEventListener('resize', () => {
+            resizeCanvas();
+        });
+
+        window.onload = () => {
+            console.log("window.onload called, calling initGame()");
+            initGame();
+        };
+    </script>
+</body>
+</html>
